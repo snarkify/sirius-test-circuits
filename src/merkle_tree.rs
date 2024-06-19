@@ -1,7 +1,8 @@
 #![allow(dead_code)]
 
-use std::{array, collections::HashMap, fmt, num::NonZeroUsize};
+use std::{array, collections::HashMap, fmt, iter, num::NonZeroUsize};
 
+use itertools::Itertools;
 use sirius::{
     halo2curves::ff::{FromUniformBytes, PrimeField, PrimeFieldBits},
     poseidon::{PoseidonRO, ROPair},
@@ -36,10 +37,10 @@ impl Level {
     pub fn new(level: u8) -> Option<Self> {
         level.le(&31).then_some(Self(level))
     }
-    pub fn zero() -> Self {
+    pub const fn zero() -> Self {
         Level(0)
     }
-    pub fn root() -> Self {
+    pub const fn root() -> Self {
         Level(DEPTH - 1)
     }
     pub fn get(&self) -> usize {
@@ -50,6 +51,9 @@ impl Level {
     }
     pub fn saturating_prev(&self) -> Self {
         Self::new(self.0.saturating_sub(1)).unwrap()
+    }
+    pub fn iter_all() -> impl Iterator<Item = Self> {
+        iter::successors(Some(Level::zero()), Level::checked_next)
     }
 }
 
@@ -126,16 +130,20 @@ struct MerkleTree<F: PrimeField> {
 }
 
 #[derive(Debug)]
-struct NodeUpdate<F: PrimeField> {
+struct NodeUpdate<F> {
+    /// Index of node in a level
     index: u32,
+    /// Old value, before update
     old: F,
+    /// New value, after update
     new: F,
-    /// `None` for leaves
-    sibling: F,
+    /// Sibling of this node, to calculate the next level value
+    /// None for root
+    sibling: Option<F>,
 }
 
 #[derive(Debug)]
-pub struct Proof<F: PrimeField> {
+pub struct Proof<F> {
     path: [NodeUpdate<F>; 32],
 }
 
@@ -144,8 +152,7 @@ where
     F: serde::Serialize + PrimeField + FromUniformBytes<64> + PrimeFieldBits,
 {
     pub fn verify(&self) -> bool {
-        for next_level in (1..DEPTH).map(|l| Level::new(l).unwrap()) {
-            let level = next_level.saturating_prev();
+        for (level, next_level) in Level::iter_all().tuple_windows() {
             let NodeUpdate {
                 index,
                 old,
@@ -157,7 +164,9 @@ where
 
             debug!("start work with index: {index}");
 
-            let sibling = index.get_sibling().map(|_| sibling);
+            let sibling = index
+                .get_sibling()
+                .map(|_| sibling.expect("root unreachable"));
 
             let (old_next_value, new_next_value) = match &sibling {
                 Sibling::Left(left) => {
@@ -222,6 +231,8 @@ where
     }
 
     pub fn update_leaf(&mut self, index: u32, input: F) -> Proof<F> {
+        assert!(index != u32::MAX);
+
         let mut current = Index {
             level: Level::zero(),
             index,
@@ -235,7 +246,7 @@ where
             index: current.index,
             old: self.update_node(current.clone(), new_leaf),
             new: new_leaf,
-            sibling: sibling.clone().unwrap(),
+            sibling: Some(sibling.clone().unwrap()),
         };
 
         debug!(
@@ -249,6 +260,7 @@ where
         paths[0] = Some(upd);
 
         loop {
+            debug!("{current}");
             let current_val = *self.get_node(current.clone());
 
             let new_value = match &sibling {
@@ -270,7 +282,7 @@ where
                 index: current.index,
                 old: old_value,
                 new: new_value,
-                sibling: sibling.clone().unwrap(),
+                sibling: Some(sibling.clone().unwrap()),
             });
 
             if current.is_root() {
@@ -310,6 +322,29 @@ mod test {
                 assert_eq!(upd1.index, upd2.index);
                 assert_eq!(upd1.new, upd2.old);
                 assert_eq!(upd1.sibling, upd2.sibling);
+            });
+
+        let pr3 = tr.update_leaf(2u32.pow(31) - 1, Fr::random(&mut rng));
+        assert!(pr3.verify());
+
+        pr3.path
+            .iter()
+            .zip(Level::iter_all())
+            .for_each(|(upd, level)| {
+                let default = *tr.get_default_value(&level);
+
+                // all nodes, but root, changed
+                if level != Level::root() {
+                    assert_eq!(upd.old, default, "at {level} & {}", upd.index);
+                }
+
+                // sibling not filled only for root
+                if let Some(sibling) = upd.sibling {
+                    // sibling for 31 level is not default
+                    if level != Level::root().saturating_prev() {
+                        assert_eq!(sibling, default, "at {level}");
+                    }
+                }
             });
     }
 }
