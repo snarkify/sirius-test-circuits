@@ -1,11 +1,12 @@
 #![allow(dead_code)]
 
-use std::{array, collections::HashMap, iter, num::NonZeroUsize};
+use std::{array, collections::HashMap, fmt, num::NonZeroUsize};
 
 use sirius::{
     halo2curves::ff::{FromUniformBytes, PrimeField, PrimeFieldBits},
     poseidon::{PoseidonRO, ROPair},
 };
+use tracing::*;
 
 use crate::Spec;
 
@@ -25,6 +26,12 @@ const DEPTH: u8 = 32;
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Level(u8);
 
+impl fmt::Display for Level {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 impl Level {
     pub fn new(level: u8) -> Option<Self> {
         level.le(&31).then_some(Self(level))
@@ -41,6 +48,9 @@ impl Level {
     pub fn checked_next(&self) -> Option<Self> {
         Self::new(self.0 + 1)
     }
+    pub fn saturating_prev(&self) -> Self {
+        Self::new(self.0.saturating_sub(1)).unwrap()
+    }
 }
 
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
@@ -49,7 +59,13 @@ struct Index {
     index: u32,
 }
 
-#[derive(Debug)]
+impl fmt::Display for Index {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "[{}][{}]", self.level, self.index)
+    }
+}
+
+#[derive(Debug, Clone)]
 enum Sibling<V> {
     Left(V),
     Right(V),
@@ -110,16 +126,65 @@ struct MerkleTree<F: PrimeField> {
 }
 
 #[derive(Debug)]
-struct Update<F: PrimeField> {
+struct NodeUpdate<F: PrimeField> {
     index: u32,
     old: F,
     new: F,
-    sibling: Option<F>,
+    /// `None` for leaves
+    sibling: F,
 }
 
 #[derive(Debug)]
-pub struct UpdateProof<F: PrimeField> {
-    path: [Update<F>; 32],
+pub struct Proof<F: PrimeField> {
+    path: [NodeUpdate<F>; 32],
+}
+
+impl<F: PrimeField> Proof<F>
+where
+    F: serde::Serialize + PrimeField + FromUniformBytes<64> + PrimeFieldBits,
+{
+    pub fn verify(&self) -> bool {
+        for next_level in (1..DEPTH).map(|l| Level::new(l).unwrap()) {
+            let level = next_level.saturating_prev();
+            let NodeUpdate {
+                index,
+                old,
+                new,
+                sibling,
+            } = self.path[level.get()];
+
+            let index = Index { index, level };
+
+            debug!("start work with index: {index}");
+
+            let sibling = index.get_sibling().map(|_| sibling);
+
+            let (old_next_value, new_next_value) = match &sibling {
+                Sibling::Left(left) => {
+                    debug!("hash left {left:?} with {{ old:{old:?} , new:{new:?} }}");
+                    (hash(*left, old), hash(*left, new))
+                }
+                Sibling::Right(right) => {
+                    debug!("hash right {right:?} with {{ old:{old:?} , new:{new:?} }}");
+                    (hash(old, *right), hash(new, *right))
+                }
+            };
+
+            let expected_old = self.path[next_level.get()].old;
+            if expected_old != old_next_value {
+                error!("`old` not match {expected_old:?} != {old_next_value:?}");
+                return false;
+            }
+
+            let expected_new = self.path[next_level.get()].new;
+            if expected_new != new_next_value {
+                error!("`new` not match {expected_new:?} != {new_next_value:?}");
+                return false;
+            }
+        }
+
+        true
+    }
 }
 
 impl<F: PrimeField> MerkleTree<F>
@@ -156,7 +221,7 @@ where
             .unwrap_or_else(|| *self.get_default_value(&index.level))
     }
 
-    pub fn update_leaf(&mut self, index: u32, input: F) -> UpdateProof<F> {
+    pub fn update_leaf(&mut self, index: u32, input: F) -> Proof<F> {
         let mut current = Index {
             level: Level::zero(),
             index,
@@ -164,16 +229,27 @@ where
 
         let mut paths = array::from_fn(|_| None);
         let new_leaf = hash(input, input);
-        paths[0] = Some(Update {
+        let mut sibling = current.get_sibling().map(|s| *self.get_node(s));
+
+        let upd = NodeUpdate {
             index: current.index,
             old: self.update_node(current.clone(), new_leaf),
             new: new_leaf,
-            sibling: None,
-        });
+            sibling: sibling.clone().unwrap(),
+        };
+
+        debug!(
+            "hash{current}: sib:{sibling:?} with {current_val:?} is {new_value:?} from {old_value:?}",
+            sibling = upd.sibling,
+            current_val = new_leaf,
+            new_value = upd.new,
+            old_value = upd.old
+        );
+
+        paths[0] = Some(upd);
 
         loop {
             let current_val = *self.get_node(current.clone());
-            let sibling = current.get_sibling().map(|s| *self.get_node(s));
 
             let new_value = match &sibling {
                 Sibling::Left(left) => hash(*left, current_val),
@@ -185,11 +261,16 @@ where
                 .expect("root will be found at prev cycle iteration");
 
             let old_value = self.update_node(current.clone(), new_value);
-            paths[current.level.get()] = Some(Update {
+            debug!(
+                "hash{current}: sib:{sibling:?} with {current_val:?} is {new_value:?} from {old_value:?}"
+            );
+
+            sibling = current.get_sibling().map(|s| *self.get_node(s));
+            paths[current.level.get()] = Some(NodeUpdate {
                 index: current.index,
                 old: old_value,
                 new: new_value,
-                sibling: Some(sibling.unwrap()),
+                sibling: sibling.clone().unwrap(),
             });
 
             if current.is_root() {
@@ -197,7 +278,7 @@ where
             }
         }
 
-        UpdateProof {
+        Proof {
             path: paths.map(Option::unwrap),
         }
     }
@@ -206,17 +287,21 @@ where
 mod test {
     use sirius::{halo2_proofs::arithmetic::Field, halo2curves::bn256::Fr};
 
+    use tracing_test::traced_test;
+
     use super::*;
 
+    #[traced_test]
     #[test]
     fn simple_test() {
         let mut tr = MerkleTree::new();
+        debug!("{:?}", tr.default_values);
         let mut rng = rand::thread_rng();
         let pr1 = tr.update_leaf(3, Fr::random(&mut rng));
-        let pr2 = tr.update_leaf(3, Fr::random(&mut rng));
+        pr1.path.iter().for_each(|upd| {
+            assert_eq!(upd.old, upd.sibling);
+        });
 
-        dbg!(pr1);
-        dbg!(pr2);
-        panic!()
+        assert!(pr1.verify());
     }
 }
