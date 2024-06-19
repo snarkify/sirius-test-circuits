@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use std::{array, collections::HashMap, num::NonZeroUsize};
+use std::{array, collections::HashMap, iter, num::NonZeroUsize};
 
 use sirius::{
     halo2curves::ff::{FromUniformBytes, PrimeField, PrimeFieldBits},
@@ -17,7 +17,7 @@ fn hash<F>(l: F, r: F) -> F
 where
     F: serde::Serialize + PrimeField + FromUniformBytes<64> + PrimeFieldBits,
 {
-    Hasher::digest::<F>(Spec::new(10, 10), &[l, r], NonZeroUsize::new(32).unwrap())
+    Hasher::digest::<F>(Spec::new(10, 10), &[l, r], NonZeroUsize::new(128).unwrap())
 }
 
 const DEPTH: u8 = 32;
@@ -33,7 +33,7 @@ impl Level {
         Level(0)
     }
     pub fn root() -> Self {
-        Level(31)
+        Level(DEPTH - 1)
     }
     pub fn get(&self) -> usize {
         self.0 as usize
@@ -49,13 +49,34 @@ struct Index {
     index: u32,
 }
 
+#[derive(Debug)]
+enum Sibling<V> {
+    Left(V),
+    Right(V),
+}
+
+impl<V> Sibling<V> {
+    pub fn map<T>(self, f: impl FnOnce(V) -> T) -> Sibling<T> {
+        match self {
+            Sibling::Left(l) => Sibling::Left(f(l)),
+            Sibling::Right(r) => Sibling::Right(f(r)),
+        }
+    }
+    pub fn unwrap(self) -> V {
+        match self {
+            Sibling::Left(l) => l,
+            Sibling::Right(r) => r,
+        }
+    }
+}
+
 impl Index {
     pub fn is_root(&self) -> bool {
         matches!(
             &self,
             Index {
                 index: 0,
-                level: Level(DEPTH)
+                level: Level(31)
             },
         )
     }
@@ -63,17 +84,22 @@ impl Index {
     pub fn next_level(&self) -> Option<Self> {
         Some(Self {
             level: self.level.checked_next()?,
-            index: self.index.div_ceil(2),
+            index: self.index / 2,
         })
     }
-    pub fn get_sibling(&self) -> Self {
-        Self {
-            level: self.level.clone(),
-            index: if self.index % 2 == 0 {
-                self.index + 1
-            } else {
-                self.index - 1
-            },
+    pub fn get_sibling(&self) -> Sibling<Self> {
+        let level = self.level.clone();
+
+        if self.index % 2 == 0 {
+            Sibling::Right(Self {
+                level,
+                index: self.index + 1,
+            })
+        } else {
+            Sibling::Left(Self {
+                level,
+                index: self.index - 1,
+            })
         }
     }
 }
@@ -88,6 +114,7 @@ struct Update<F: PrimeField> {
     index: u32,
     old: F,
     new: F,
+    sibling: Option<F>,
 }
 
 #[derive(Debug)]
@@ -100,7 +127,7 @@ where
     F: serde::Serialize + PrimeField + FromUniformBytes<64> + PrimeFieldBits,
 {
     pub fn new() -> Self {
-        let mut default_values = [F::ZERO; 32];
+        let mut default_values = [hash(F::ZERO, F::ZERO); 32];
 
         for lvl in 1..(DEPTH as usize) {
             let previous_level_value = default_values[lvl - 1];
@@ -134,36 +161,44 @@ where
             level: Level::zero(),
             index,
         };
-        let mut new_value = hash(input, input);
 
-        let mut path = array::from_fn(|_| None);
+        let mut paths = array::from_fn(|_| None);
+        let new_leaf = hash(input, input);
+        paths[0] = Some(Update {
+            index: current.index,
+            old: self.update_node(current.clone(), new_leaf),
+            new: new_leaf,
+            sibling: None,
+        });
 
         loop {
+            let current_val = *self.get_node(current.clone());
+            let sibling = current.get_sibling().map(|s| *self.get_node(s));
+
+            let new_value = match &sibling {
+                Sibling::Left(left) => hash(*left, current_val),
+                Sibling::Right(right) => hash(current_val, *right),
+            };
+
+            current = current
+                .next_level()
+                .expect("root will be found at prev cycle iteration");
+
             let old_value = self.update_node(current.clone(), new_value);
-
-            new_value = hash(
-                *self.get_node(current.clone()),
-                *self.get_node(current.get_sibling()),
-            );
-
-            path[current.level.get()] = Some(Update {
+            paths[current.level.get()] = Some(Update {
                 index: current.index,
                 old: old_value,
                 new: new_value,
+                sibling: Some(sibling.unwrap()),
             });
 
-            match current.next_level() {
-                Some(next) => {
-                    current = next;
-                }
-                None => {
-                    break;
-                }
+            if current.is_root() {
+                break;
             }
         }
 
         UpdateProof {
-            path: path.map(Option::unwrap),
+            path: paths.map(Option::unwrap),
         }
     }
 }
@@ -177,10 +212,11 @@ mod test {
     fn simple_test() {
         let mut tr = MerkleTree::new();
         let mut rng = rand::thread_rng();
-        let pr1 = tr.update_leaf(0, Fr::random(&mut rng));
-        let pr2 = tr.update_leaf(0, Fr::random(&mut rng));
-        let pr3 = tr.update_leaf(2, Fr::random(&mut rng));
+        let pr1 = tr.update_leaf(3, Fr::random(&mut rng));
+        let pr2 = tr.update_leaf(3, Fr::random(&mut rng));
 
-        panic!("{pr1:?} {pr2:?} {pr3:?}");
+        dbg!(pr1);
+        dbg!(pr2);
+        panic!()
     }
 }
