@@ -298,10 +298,18 @@ mod test {
         debug!("{:?}", tr.default_values);
         let mut rng = rand::thread_rng();
         let pr1 = tr.update_leaf(3, Fr::random(&mut rng));
-        pr1.path.iter().for_each(|upd| {
-            assert_eq!(upd.old, upd.sibling);
-        });
-
         assert!(pr1.verify());
+
+        let pr2 = tr.update_leaf(3, Fr::random(&mut rng));
+        assert!(pr2.verify());
+
+        pr1.path
+            .iter()
+            .zip(pr2.path.iter())
+            .for_each(|(upd1, upd2)| {
+                assert_eq!(upd1.index, upd2.index);
+                assert_eq!(upd1.new, upd2.old);
+                assert_eq!(upd1.sibling, upd2.sibling);
+            });
     }
 }
