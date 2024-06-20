@@ -702,6 +702,7 @@ dependencies = [
  "rand",
  "serde",
  "sirius",
+ "thiserror",
  "tracing",
  "tracing-test",
 ]

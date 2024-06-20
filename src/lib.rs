@@ -1,15 +1,19 @@
 #![allow(dead_code)]
 
-use std::{array, fmt};
+use std::collections::VecDeque;
 
+use itertools::Itertools;
 use sirius::{
     halo2_proofs::{
-        circuit::{AssignedCell, Chip},
-        halo2curves::ff::{FromUniformBytes, PrimeField, PrimeFieldBits},
+        circuit::{AssignedCell, Chip, Value},
+        halo2curves::ff::{FromUniformBytes, PrimeFieldBits},
+        plonk,
     },
-    main_gate::{self, AssignAdviceFrom, RegionCtx},
+    main_gate::{self, AdviceCyclicAssignor, MainGate, RegionCtx, WrapValue},
     poseidon::{PoseidonRO, ROPair},
 };
+
+use crate::merkle_tree::{NodeUpdate, Sibling};
 
 const T: usize = 3;
 const RATE: usize = T - 1;
@@ -22,97 +26,92 @@ type Spec<F> = sirius::poseidon::Spec<F, T, RATE>;
 
 type MainGateConfig = main_gate::MainGateConfig<T>;
 
-pub enum Error {}
-
-#[derive(Debug, Clone)]
-pub struct MerkleProof<H: fmt::Debug + Clone + PartialEq, const D: usize> {
-    pub source: H,
-    pub root: H,
-    pub assist: [H; D],
-    pub index: u64,
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error(transparent)]
+    Error(#[from] plonk::Error),
 }
 
-#[derive(Default, Clone)]
-pub enum Limb<F: PrimeField> {
-    #[default]
-    None,
-    Assigned(AssignedCell<F, F>),
-    Unassigned(F),
-}
-
-impl<F: PrimeField> Limb<F> {
-    fn unwrap_or_default(&self) -> F {
-        match self {
-            Limb::None => F::default(),
-            Limb::Assigned(cell) => cell.value().unwrap().copied().unwrap_or_default(),
-            Limb::Unassigned(value) => *value,
-        }
-    }
-}
-impl<'a, F: PrimeField> AssignAdviceFrom<'a, F> for Limb<F> {
-    fn assign_advice_from<A, AR>(
-        ctx: &mut RegionCtx<'a, F>,
-        annotation: A,
-        dst: sirius::halo2_proofs::plonk::Column<sirius::halo2_proofs::plonk::Advice>,
-        src: Self,
-    ) -> Result<AssignedCell<F, F>, sirius::halo2_proofs::plonk::Error>
-    where
-        A: Fn() -> AR,
-        AR: Into<String>,
-    {
-        match src {
-            Limb::None => F::assign_advice_from(ctx, annotation, dst, F::ZERO),
-            Limb::Assigned(cell) => AssignedCell::assign_advice_from(ctx, annotation, dst, cell),
-            Limb::Unassigned(value) => F::assign_advice_from(ctx, annotation, dst, value),
-        }
-    }
-}
-
-//
-//use sirius::halo2_proofs::pairing::bn256::Fr;
-//
-//use crate::host::ForeignInst::MerkleSet;
-//
-// Given a merkel tree eg1 with height=3:
-// 0
-// 1 2
-// 3 4 5 6
-// 7 8 9 10 11 12 13 14
-// A proof of 7 = {source: 7.hash, root: 0.hash, assist: [8.hash,4.hash,2.hash], index: 7}
-
-pub struct MerkleProofState<F: PrimeField, const D: usize> {
-    pub source: Limb<F>,
-    pub root: Limb<F>, // last is root
-    pub assist: [Limb<F>; D],
-    pub address: Limb<F>,
-    pub zero: Limb<F>,
-    pub one: Limb<F>,
-}
-
-impl<F: PrimeField, const D: usize> Default for MerkleProofState<F, D> {
-    fn default() -> Self {
-        MerkleProofState {
-            source: Limb::default(),
-            root: Limb::default(),
-            address: Limb::default(),
-            assist: array::from_fn(|_| Limb::default()),
-            zero: Limb::default(),
-            one: Limb::default(),
-        }
-    }
-}
-
-pub struct MerkleChip<F, const D: usize>
+pub struct MerkleTreeUpdateChip<F, const D: usize>
 where
     F: PrimeFieldBits + serde::Serialize + FromUniformBytes<64>,
 {
     pub config: MainGateConfig,
-    data_hasher_chip: HasherChip<F>,
-    merkle_hasher_chip: HasherChip<F>,
-    state: MerkleProofState<F, D>,
+    hasher_chip: HasherChip<F>,
+    tree: merkle_tree::Tree<F>,
+    proofs: VecDeque<merkle_tree::Proof<F>>,
 }
 
-impl<F, const D: usize> Chip<F> for MerkleChip<F, D>
+impl<F, const D: usize> MerkleTreeUpdateChip<F, D>
+where
+    F: PrimeFieldBits + serde::Serialize + FromUniformBytes<64>,
+{
+    pub fn update_leaf(&mut self, index: u32, new_leaf: F) {
+        let proof = self.tree.update_leaf(index, new_leaf);
+        self.proofs.push_back(proof);
+    }
+
+    pub fn prove_next_update(
+        &mut self,
+        region: &mut RegionCtx<F>,
+    ) -> Result<NodeUpdate<AssignedCell<F, F>>, sirius::halo2_proofs::plonk::Error> {
+        let proof = self.proofs.pop_front().unwrap();
+
+        let mut assigner = self.config.advice_cycle_assigner::<F>();
+        let mut assigned_proof = proof
+            .into_iter()
+            .map(|(level, update)| {
+                Result::<_, sirius::halo2_proofs::plonk::Error>::Ok((
+                    merkle_tree::Index {
+                        index: update.index,
+                        level,
+                    },
+                    update.try_map(|f| assigner.assign_next_advice(region, || "TODO", f))?,
+                ))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        region.next();
+
+        for ((index, update), (_next_index, next_update)) in assigned_proof.iter().tuple_windows() {
+            let (old_next, new_next) = match index
+                .get_sibling()
+                .map(|_| update.sibling.as_ref().expect("root unreachable"))
+            {
+                Sibling::Left(left) => {
+                    let old_calculated_next = self
+                        .hasher_chip
+                        .update(&[left.clone(), update.old.clone()].map(WrapValue::Assigned))
+                        .squeeze(region)?;
+                    let new_calculated_next = self
+                        .hasher_chip
+                        .update(&[left.clone(), update.new.clone()].map(WrapValue::Assigned))
+                        .squeeze(region)?;
+
+                    (old_calculated_next, new_calculated_next)
+                }
+                Sibling::Right(right) => {
+                    let old_calculated_next = self
+                        .hasher_chip
+                        .update(&[update.old.clone(), right.clone()].map(WrapValue::Assigned))
+                        .squeeze(region)?;
+                    let new_calculated_next = self
+                        .hasher_chip
+                        .update(&[update.new.clone(), right.clone()].map(WrapValue::Assigned))
+                        .squeeze(region)?;
+
+                    (old_calculated_next, new_calculated_next)
+                }
+            };
+
+            region.constrain_equal(old_next.cell(), next_update.old.cell())?;
+            region.constrain_equal(new_next.cell(), next_update.new.cell())?;
+        }
+
+        Ok(assigned_proof.pop().unwrap().1)
+    }
+}
+
+impl<F, const D: usize> Chip<F> for MerkleTreeUpdateChip<F, D>
 where
     F: PrimeFieldBits + serde::Serialize + FromUniformBytes<64>,
 {
@@ -125,20 +124,5 @@ where
 
     fn loaded(&self) -> &Self::Loaded {
         &()
-    }
-}
-
-impl<F, const D: usize> MerkleChip<F, D>
-where
-    F: PrimeFieldBits + serde::Serialize + FromUniformBytes<64>,
-    F::Repr: PartialEq + fmt::Debug,
-{
-    pub fn new(config: MainGateConfig, spec: Spec<F>) -> Self {
-        MerkleChip {
-            merkle_hasher_chip: HasherChip::new(config.clone(), spec.clone()),
-            data_hasher_chip: HasherChip::new(config.clone(), spec.clone()),
-            config,
-            state: MerkleProofState::default(),
-        }
     }
 }

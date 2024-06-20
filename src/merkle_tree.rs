@@ -15,7 +15,7 @@ use super::{RATE, T};
 
 type Hasher<F> = <PoseidonRO<T, RATE> as ROPair<F>>::OffCircuit;
 
-fn hash<F>(l: F, r: F) -> F
+pub fn hash<F>(l: F, r: F) -> F
 where
     F: serde::Serialize + PrimeField + FromUniformBytes<64> + PrimeFieldBits,
 {
@@ -58,9 +58,9 @@ impl Level {
 }
 
 #[derive(Debug, PartialEq, Eq, Hash, Clone)]
-struct Index {
-    level: Level,
-    index: u32,
+pub struct Index {
+    pub(crate) level: Level,
+    pub(crate) index: u32,
 }
 
 impl fmt::Display for Index {
@@ -70,7 +70,7 @@ impl fmt::Display for Index {
 }
 
 #[derive(Debug, Clone)]
-enum Sibling<V> {
+pub enum Sibling<V> {
     Left(V),
     Right(V),
 }
@@ -124,27 +124,57 @@ impl Index {
     }
 }
 
-struct MerkleTree<F: PrimeField> {
+pub struct Tree<F: PrimeField> {
     filled_nodes: HashMap<Index, F>,
     default_values: [F; 32],
 }
 
 #[derive(Debug)]
-struct NodeUpdate<F> {
+pub struct NodeUpdate<F> {
     /// Index of node in a level
-    index: u32,
+    pub(crate) index: u32,
     /// Old value, before update
-    old: F,
+    pub(crate) old: F,
     /// New value, after update
-    new: F,
+    pub(crate) new: F,
     /// Sibling of this node, to calculate the next level value
     /// None for root
-    sibling: Option<F>,
+    pub(crate) sibling: Option<F>,
+}
+
+impl<F> NodeUpdate<F> {
+    pub fn map<T>(self, mut f: impl FnMut(F) -> T) -> NodeUpdate<T> {
+        NodeUpdate {
+            index: self.index,
+            old: f(self.old),
+            new: f(self.new),
+            sibling: self.sibling.map(|v| f(v)),
+        }
+    }
+
+    pub fn try_map<T, E>(self, mut f: impl FnMut(F) -> Result<T, E>) -> Result<NodeUpdate<T>, E> {
+        Ok(NodeUpdate {
+            index: self.index,
+            old: f(self.old)?,
+            new: f(self.new)?,
+            sibling: self.sibling.map(|v| f(v)).transpose()?,
+        })
+    }
 }
 
 #[derive(Debug)]
 pub struct Proof<F> {
     path: [NodeUpdate<F>; 32],
+}
+
+impl<F: PrimeField> Proof<F> {
+    pub fn iter(&self) -> impl Iterator<Item = (Level, &NodeUpdate<F>)> {
+        Level::iter_all().zip(self.path.iter())
+    }
+
+    pub fn into_iter(self) -> impl Iterator<Item = (Level, NodeUpdate<F>)> {
+        Level::iter_all().zip(self.path.into_iter())
+    }
 }
 
 impl<F: PrimeField> Proof<F>
@@ -196,11 +226,11 @@ where
     }
 }
 
-impl<F: PrimeField> MerkleTree<F>
+impl<F: PrimeField> Default for Tree<F>
 where
     F: serde::Serialize + PrimeField + FromUniformBytes<64> + PrimeFieldBits,
 {
-    pub fn new() -> Self {
+    fn default() -> Self {
         let mut default_values = [hash(F::ZERO, F::ZERO); 32];
 
         for lvl in 1..(DEPTH as usize) {
@@ -213,7 +243,12 @@ where
             filled_nodes: HashMap::new(),
         }
     }
+}
 
+impl<F: PrimeField> Tree<F>
+where
+    F: serde::Serialize + PrimeField + FromUniformBytes<64> + PrimeFieldBits,
+{
     fn get_default_value(&self, level: &Level) -> &F {
         self.default_values.get(level.get()).unwrap()
     }
@@ -231,7 +266,7 @@ where
     }
 
     pub fn update_leaf(&mut self, index: u32, input: F) -> Proof<F> {
-        assert!(index != u32::MAX);
+        assert_ne!(index, u32::MAX);
 
         let mut current = Index {
             level: Level::zero(),
@@ -306,7 +341,7 @@ mod test {
     #[traced_test]
     #[test]
     fn simple_test() {
-        let mut tr = MerkleTree::new();
+        let mut tr = Tree::default();
         debug!("{:?}", tr.default_values);
         let mut rng = rand::thread_rng();
         let pr1 = tr.update_leaf(3, Fr::random(&mut rng));
