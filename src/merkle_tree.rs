@@ -330,6 +330,7 @@ where
         }
     }
 }
+
 #[cfg(test)]
 mod test {
     use sirius::{halo2_proofs::arithmetic::Field, halo2curves::bn256::Fr};
