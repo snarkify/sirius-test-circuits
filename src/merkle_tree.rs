@@ -148,7 +148,7 @@ impl<F> NodeUpdate<F> {
             index: self.index,
             old: f(self.old),
             new: f(self.new),
-            sibling: self.sibling.map(|v| f(v)),
+            sibling: self.sibling.map(f),
         }
     }
 
@@ -157,7 +157,7 @@ impl<F> NodeUpdate<F> {
             index: self.index,
             old: f(self.old)?,
             new: f(self.new)?,
-            sibling: self.sibling.map(|v| f(v)).transpose()?,
+            sibling: self.sibling.map(f).transpose()?,
         })
     }
 }
@@ -172,8 +172,8 @@ impl<F: PrimeField> Proof<F> {
         Level::iter_all().zip(self.path.iter())
     }
 
-    pub fn into_iter(self) -> impl Iterator<Item = (Level, NodeUpdate<F>)> {
-        Level::iter_all().zip(self.path.into_iter())
+    pub fn into_iter_with_level(self) -> impl Iterator<Item = (Level, NodeUpdate<F>)> {
+        Level::iter_all().zip(self.path)
     }
 }
 

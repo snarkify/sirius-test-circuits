@@ -5,11 +5,10 @@ use std::collections::VecDeque;
 use itertools::Itertools;
 use sirius::{
     halo2_proofs::{
-        circuit::{AssignedCell, Chip, Value},
+        circuit::{AssignedCell, Chip},
         halo2curves::ff::{FromUniformBytes, PrimeFieldBits},
-        plonk,
     },
-    main_gate::{self, AdviceCyclicAssignor, MainGate, RegionCtx, WrapValue},
+    main_gate::{self, AdviceCyclicAssignor, RegionCtx, WrapValue},
     poseidon::{PoseidonRO, ROPair},
 };
 
@@ -25,12 +24,6 @@ pub mod merkle_tree;
 type Spec<F> = sirius::poseidon::Spec<F, T, RATE>;
 
 type MainGateConfig = main_gate::MainGateConfig<T>;
-
-#[derive(Debug, thiserror::Error)]
-pub enum Error {
-    #[error(transparent)]
-    Error(#[from] plonk::Error),
-}
 
 pub struct MerkleTreeUpdateChip<F, const D: usize>
 where
@@ -59,7 +52,7 @@ where
 
         let mut assigner = self.config.advice_cycle_assigner::<F>();
         let mut assigned_proof = proof
-            .into_iter()
+            .into_iter_with_level()
             .map(|(level, update)| {
                 Result::<_, sirius::halo2_proofs::plonk::Error>::Ok((
                     merkle_tree::Index {
@@ -78,28 +71,28 @@ where
                 .map(|_| update.sibling.as_ref().expect("root unreachable"))
             {
                 Sibling::Left(left) => {
-                    let old_calculated_next = self
+                    let old_next = self
                         .hasher_chip
-                        .update(&[left.clone(), update.old.clone()].map(WrapValue::Assigned))
+                        .update(&[left, &update.old].map(|c| WrapValue::Assigned(c.clone())))
                         .squeeze(region)?;
-                    let new_calculated_next = self
+                    let new_next = self
                         .hasher_chip
-                        .update(&[left.clone(), update.new.clone()].map(WrapValue::Assigned))
+                        .update(&[left, &update.new].map(|c| WrapValue::Assigned(c.clone())))
                         .squeeze(region)?;
 
-                    (old_calculated_next, new_calculated_next)
+                    (old_next, new_next)
                 }
                 Sibling::Right(right) => {
-                    let old_calculated_next = self
+                    let old_next = self
                         .hasher_chip
-                        .update(&[update.old.clone(), right.clone()].map(WrapValue::Assigned))
+                        .update(&[&update.old, right].map(|c| WrapValue::Assigned(c.clone())))
                         .squeeze(region)?;
-                    let new_calculated_next = self
+                    let new_next = self
                         .hasher_chip
-                        .update(&[update.new.clone(), right.clone()].map(WrapValue::Assigned))
+                        .update(&[&update.new, right].map(|c| WrapValue::Assigned(c.clone())))
                         .squeeze(region)?;
 
-                    (old_calculated_next, new_calculated_next)
+                    (old_next, new_next)
                 }
             };
 
