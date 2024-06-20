@@ -5,12 +5,12 @@ use sirius::{
         halo2curves::ff::{FromUniformBytes, PrimeFieldBits},
     },
     main_gate::{AdviceCyclicAssignor, RegionCtx, WrapValue},
-    poseidon::ROCircuitTrait,
 };
 
-use super::{merkle_tree, HasherChip, MainGateConfig, Spec};
-
-use crate::merkle_tree::{NodeUpdate, Sibling, NUM_BITS};
+use super::{
+    merkle_tree::{self, NodeUpdate, Sibling},
+    HasherChip, MainGateConfig, Spec,
+};
 
 pub struct MerkleTreeUpdateChip<F>
 where
@@ -93,6 +93,8 @@ where
             };
 
             assert_eq!(old_next.value().unwrap(), next_update.old.value().unwrap());
+            assert_eq!(new_next.value().unwrap(), next_update.new.value().unwrap());
+
             region.constrain_equal(old_next.cell(), next_update.old.cell())?;
             region.constrain_equal(new_next.cell(), next_update.new.cell())?;
         }
@@ -105,7 +107,6 @@ where
 mod tests {
     use std::{io, num::NonZeroUsize, path::Path};
 
-    use rand::Rng;
     use sirius::{
         commitment::CommitmentKey,
         halo2_proofs::{circuit::*, plonk::*},
