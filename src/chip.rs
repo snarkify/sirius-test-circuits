@@ -65,6 +65,7 @@ where
                 .map(|_| update.sibling.as_ref().expect("root unreachable"))
             {
                 Sibling::Left(left) => {
+                    // TODO Lock at proof level order of input
                     let old_next = self
                         .hasher_chip(&config)
                         .update(&[left, &update.old].map(|c| WrapValue::Assigned(c.clone())))
@@ -77,6 +78,7 @@ where
                     (old_next, new_next)
                 }
                 Sibling::Right(right) => {
+                    // TODO Lock at proof level order of input
                     let old_next = self
                         .hasher_chip(&config)
                         .update(&[&update.old, right].map(|c| WrapValue::Assigned(c.clone())))
