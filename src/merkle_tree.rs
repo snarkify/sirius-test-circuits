@@ -15,11 +15,13 @@ use super::{RATE, T};
 
 type Hasher<F> = <PoseidonRO<T, RATE> as ROPair<F>>::OffCircuit;
 
+pub const NUM_BITS: NonZeroUsize = unsafe { NonZeroUsize::new_unchecked(255) };
+
 pub fn hash<F>(l: F, r: F) -> F
 where
     F: serde::Serialize + PrimeField + FromUniformBytes<64> + PrimeFieldBits,
 {
-    Hasher::digest::<F>(Spec::new(10, 10), &[l, r], NonZeroUsize::new(128).unwrap())
+    Hasher::digest::<F>(Spec::new(10, 10), &[l, r], NUM_BITS)
 }
 
 const DEPTH: u8 = 32;
@@ -61,6 +63,15 @@ impl Level {
 pub struct Index {
     pub(crate) level: Level,
     pub(crate) index: u32,
+}
+
+impl Index {
+    pub fn root() -> Self {
+        Self {
+            level: Level::root(),
+            index: 0,
+        }
+    }
 }
 
 impl fmt::Display for Index {
@@ -129,7 +140,7 @@ pub struct Tree<F: PrimeField> {
     default_values: [F; 32],
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct NodeUpdate<F> {
     /// Index of node in a level
     pub(crate) index: u32,
@@ -162,7 +173,7 @@ impl<F> NodeUpdate<F> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Proof<F> {
     path: [NodeUpdate<F>; 32],
 }
@@ -249,6 +260,10 @@ impl<F: PrimeField> Tree<F>
 where
     F: serde::Serialize + PrimeField + FromUniformBytes<64> + PrimeFieldBits,
 {
+    pub fn get_root(&self) -> &F {
+        self.get_node(Index::root())
+    }
+
     fn get_default_value(&self, level: &Level) -> &F {
         self.default_values.get(level.get()).unwrap()
     }
@@ -303,9 +318,9 @@ where
                 Sibling::Right(right) => hash(current_val, *right),
             };
 
-            current = current
-                .next_level()
-                .expect("root will be found at prev cycle iteration");
+            current = current.next_level().unwrap_or_else(|| {
+                panic!("root will be found at prev cycle iteration: {:?}", current)
+            });
 
             let old_value = self.update_node(current.clone(), new_value);
             debug!(

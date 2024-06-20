@@ -5,7 +5,7 @@ use sirius::{
     poseidon::{PoseidonRO, ROPair},
 };
 
-const T: usize = 3;
+const T: usize = 4;
 const RATE: usize = T - 1;
 
 type HasherChip<F> = <PoseidonRO<T, RATE> as ROPair<F>>::OnCircuit;
