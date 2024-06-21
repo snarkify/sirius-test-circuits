@@ -1,16 +1,15 @@
 #![allow(dead_code)]
-
-use sirius::{
+pub use sirius::{
     main_gate::{self},
     poseidon::{PoseidonRO, ROPair},
 };
 
-const T: usize = 4;
-const RATE: usize = T - 1;
+pub const T: usize = 4;
+pub const RATE: usize = T - 1;
 
-type HasherChip<F> = <PoseidonRO<T, RATE> as ROPair<F>>::OnCircuit;
-type Spec<F> = sirius::poseidon::Spec<F, T, RATE>;
-type MainGateConfig = main_gate::MainGateConfig<T>;
+pub type HasherChip<F> = <PoseidonRO<T, RATE> as ROPair<F>>::OnCircuit;
+pub type Spec<F> = sirius::poseidon::Spec<F, T, RATE>;
+pub type MainGateConfig = main_gate::MainGateConfig<T>;
 
 pub mod chip;
 pub mod merkle_tree;

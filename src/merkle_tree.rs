@@ -25,6 +25,7 @@ where
 }
 
 const DEPTH: u8 = 32;
+const DEPTH_SIZE: usize = DEPTH as usize;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Level(u8);
@@ -37,13 +38,16 @@ impl fmt::Display for Level {
 
 impl Level {
     pub fn new(level: u8) -> Option<Self> {
-        level.le(&31).then_some(Self(level))
+        level.lt(&DEPTH).then_some(Self(level))
     }
     pub const fn zero() -> Self {
         Level(0)
     }
     pub const fn root() -> Self {
         Level(DEPTH - 1)
+    }
+    pub const fn is_root(&self) -> bool {
+        self.0 == DEPTH - 1
     }
     pub fn get(&self) -> usize {
         self.0 as usize
@@ -66,6 +70,11 @@ pub struct Index {
 }
 
 impl Index {
+    pub fn new(index: u32, level: Level) -> Option<Self> {
+        const LIMIT: u32 = 1 << 31;
+
+        index.lt(&LIMIT).then_some(Self { index, level })
+    }
     pub fn root() -> Self {
         Self {
             level: Level::root(),
@@ -107,8 +116,8 @@ impl Index {
             &self,
             Index {
                 index: 0,
-                level: Level(31)
-            },
+                level
+            } if level.is_root(),
         )
     }
 
@@ -137,20 +146,20 @@ impl Index {
 
 pub struct Tree<F: PrimeField> {
     filled_nodes: HashMap<Index, F>,
-    default_values: [F; 32],
+    default_values: [F; DEPTH_SIZE],
 }
 
 #[derive(Debug, Clone)]
 pub struct NodeUpdate<F> {
     /// Index of node in a level
-    pub(crate) index: u32,
+    pub index: u32,
     /// Old value, before update
-    pub(crate) old: F,
+    pub old: F,
     /// New value, after update
-    pub(crate) new: F,
+    pub new: F,
     /// Sibling of this node, to calculate the next level value
     /// None for root
-    pub(crate) sibling: Option<F>,
+    pub sibling: Option<F>,
 }
 
 impl<F> NodeUpdate<F> {
@@ -175,7 +184,7 @@ impl<F> NodeUpdate<F> {
 
 #[derive(Debug, Clone)]
 pub struct Proof<F> {
-    path: [NodeUpdate<F>; 32],
+    path: [NodeUpdate<F>; DEPTH_SIZE],
 }
 
 impl<F: PrimeField> Proof<F> {
@@ -185,6 +194,10 @@ impl<F: PrimeField> Proof<F> {
 
     pub fn into_iter_with_level(self) -> impl Iterator<Item = (Level, NodeUpdate<F>)> {
         Level::iter_all().zip(self.path)
+    }
+
+    pub fn root(&self) -> &NodeUpdate<F> {
+        self.path.last().unwrap()
     }
 }
 
@@ -242,11 +255,11 @@ where
     F: serde::Serialize + PrimeField + FromUniformBytes<64> + PrimeFieldBits,
 {
     fn default() -> Self {
-        let mut default_values = [hash(F::ZERO, F::ZERO); 32];
+        let mut default_values = [hash(F::ZERO, F::ZERO); DEPTH_SIZE];
 
-        for lvl in 1..(DEPTH as usize) {
-            let previous_level_value = default_values[lvl - 1];
-            default_values[lvl] = hash(previous_level_value, previous_level_value);
+        for lvl in Level::iter_all().skip(1) {
+            let previous_level_value = default_values[lvl.get() - 1];
+            default_values[lvl.get()] = hash(previous_level_value, previous_level_value);
         }
 
         Self {
@@ -280,13 +293,9 @@ where
             .unwrap_or_else(|| *self.get_default_value(&index.level))
     }
 
+    #[instrument(skip(self))]
     pub fn update_leaf(&mut self, index: u32, input: F) -> Proof<F> {
-        assert_ne!(index, u32::MAX);
-
-        let mut current = Index {
-            level: Level::zero(),
-            index,
-        };
+        let mut current = Index::new(index, Level::zero()).unwrap();
 
         let mut paths = array::from_fn(|_| None);
         let new_leaf = hash(input, input);
@@ -310,7 +319,7 @@ where
         paths[0] = Some(upd);
 
         loop {
-            debug!("{current}");
+            debug!("Start with index: {current}");
             let current_val = *self.get_node(current.clone());
 
             let new_value = match &sibling {
@@ -375,7 +384,7 @@ mod test {
                 assert_eq!(upd1.sibling, upd2.sibling);
             });
 
-        let pr3 = tr.update_leaf(2u32.pow(31) - 1, Fr::random(&mut rng));
+        let pr3 = tr.update_leaf((1u32 << 31) - 1, Fr::random(&mut rng));
         assert!(pr3.verify());
 
         pr3.path
